@@ -1,0 +1,452 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Semantic Search project - ECS stack with Search API and LLM model API
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: semantic-search
+  VpcId:
+    Type: String
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+  SearchApiContainerImage:
+    Type: String
+    Description: Docker image URI for Spring Boot Search API (in ECR)
+  SearchApiServicePort:
+    Type: Number
+    Default: 8080
+  SearchApiContextPath:
+    Type: String
+    Default: /search
+  LLMServiceContainerImage:
+    Type: String
+    Description: Docker image URI for LLM model inference service (in ECR)
+  LLMServicePort:
+    Type: Number
+    Default: 8081
+  LLMServiceContextPath:
+    Type: String
+    Default: /llm
+  LLMServiceModelName:
+    Type: String
+    Description: LLM Model name which is used for vectors calculations
+    Default: sentence-transformers/all-MiniLM-L6-v2
+    # Lightweight (Free): sentence-transformers/all-MiniLM-L6-v2 (384-dim embeddings)
+    # Advanced          : sentence-transformers/all-mpnet-base-v2 (768-dim embeddings)
+  DBSecretArn:
+    Type: String
+
+Resources:
+
+  # ======================
+  # ECS Clustrer
+  # ======================
+
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub "${ProjectName}-cluster"
+
+  # ======================
+  # ECS service Security Group
+  # ======================
+
+  ECSServiceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref VpcId
+      GroupDescription: Security group for ECS services
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
+          Description: HTTP from ALB
+        - IpProtocol: tcp
+          FromPort: !Ref SearchApiServicePort
+          ToPort: !Ref SearchApiServicePort
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
+          Description: HTTP from ALB
+        - IpProtocol: tcp
+          FromPort: !Ref LLMServicePort
+          ToPort: !Ref LLMServicePort
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
+          Description: HTTP from ALB
+
+  # ======================
+  # ECS Task Execution Role
+  # ======================
+
+  ECSTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: ecsTaskExecutionRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+        - arn:aws:iam::aws:policy/CloudWatchLogsFullAccess
+      Policies:
+        - PolicyName: SecretsAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource:
+                  - !Ref DBSecretArn
+                  - !Ref LLMSecret
+        - PolicyName: CloudWatchLogsPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: 
+                  - !GetAtt LLMServiceLogGroup.Arn
+                  - !GetAtt SearchApiLogGroup.Arn
+
+  # ======================
+  # ECS App Role
+  # ======================
+
+  ECSAppRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: ecsAppRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ECSAppAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              #- Sid: S3Read
+              #  Effect: Allow
+              #  Action:
+              #    - s3:GetObject
+              #    - s3:ListBucket
+              #  Resource:
+              #    - Fn::ImportValue: AppDataBucketArn
+              #    - !Sub "${AppDataBucketArn}/*"
+              - Sid: SecretsManagerRead
+                Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource:
+                  - !Ref DBSecretArn
+
+  # ======================
+  # ALB
+  # ======================
+
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref VpcId
+      GroupDescription: Security group for ALB
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: "HTTP from internet"
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0  # Allow HTTPS from anywhere
+          Description: "HTTPS from internet"
+
+  ALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name:  !Sub "${ProjectName}-alb"
+      Scheme: internet-facing
+      Type: application
+      IpAddressType: ipv4
+      Subnets: !Ref SubnetIds
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ALB
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: fixed-response
+          FixedResponseConfig:
+            StatusCode: "404"
+            ContentType: "text/plain"            
+            MessageBody: "Not Found"
+
+  # ======================
+  # LLM API Target Group
+  # ======================
+
+  LLMServiceTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub "${ProjectName}-llm-service-tg"
+      VpcId: !Ref VpcId
+      Port: !Ref LLMServicePort
+      Protocol: HTTP
+      TargetType: ip
+      HealthCheckPath: !Sub "${LLMServiceContextPath}/health"
+      HealthCheckProtocol: HTTP
+      HealthCheckPort: traffic-port  # Use same port as traffic
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher:
+        HttpCode: 200
+
+  # ======================
+  # LLM API Listener Rule
+  # ======================
+
+  LLMServiceListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref ALBListener
+      Priority: 20
+      Conditions:
+        - Field: path-pattern
+          Values:
+            - !Sub "${LLMServiceContextPath}/*"
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref LLMServiceTargetGroup
+
+
+  # ======================
+  # LLM API Log Group
+  # ======================
+
+  LLMServiceLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/ecs/${ProjectName}/llm-service"
+      RetentionInDays: 7
+
+  # ======================
+  # LLM API Task Definition
+  # ======================
+
+  LLMServiceTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub "${ProjectName}-llm-service"
+      Cpu: 1024
+      Memory: 2048
+      NetworkMode: awsvpc
+      RequiresCompatibilities: [FARGATE]
+      ExecutionRoleArn: !GetAtt ECSTaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt ECSAppRole.Arn
+      ContainerDefinitions:
+        - Name: llm-service
+          Image: !Ref LLMServiceContainerImage
+          Essential: true
+          PortMappings:
+            - ContainerPort: !Ref LLMServicePort
+              Protocol: tcp
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LLMServiceLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ecs
+              #awslogs-create-group: "false"  # Since we're creating it explicitly
+          Environment:
+            - Name: ROOT_PATH
+              Value: !Ref LLMServiceContextPath
+            - Name: PORT
+              Value: !Sub "${LLMServicePort}"
+            - Name: MODEL_NAME
+              Value: !Ref LLMServiceModelName
+
+  # ======================
+  # LLM API ECS Service
+  # ======================
+
+  LLMService:
+    Type: AWS::ECS::Service
+    #DependsOn: InternetGateway
+    Properties:
+      Cluster: !Ref ECSCluster
+      LaunchType: FARGATE
+      DesiredCount: 1
+      TaskDefinition: !Ref LLMServiceTaskDefinition
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          SecurityGroups: [!Ref ECSServiceSecurityGroup]
+          Subnets: !Ref SubnetIds
+      LoadBalancers:
+        - TargetGroupArn: !Ref LLMServiceTargetGroup
+          ContainerName: llm-service
+          ContainerPort: !Ref LLMServicePort
+    DependsOn: 
+      - LLMServiceListenerRule
+
+  # ======================
+  # LLM API ECS Service
+  # ======================
+
+  LLMSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub "${ProjectName}/llm-endpoint"
+      Description: LLM service endpoint
+      SecretString: !Sub |
+        {
+          "url": "http://${ALB.DNSName}${LLMServiceContextPath}"
+        }
+
+  # ======================
+  # Search API Target Group
+  # ======================
+
+  SearchApiTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub "${ProjectName}-search-api-tg"
+      VpcId: !Ref VpcId
+      Port: !Ref SearchApiServicePort
+      Protocol: HTTP
+      TargetType: ip
+      HealthCheckPath: !Sub "${SearchApiContextPath}/actuator/health"
+      Matcher:
+        HttpCode: "200"
+
+  # ======================
+  # Search API Listener Rule
+  # ======================
+
+  SearchApiListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref ALBListener
+      Priority: 10
+      Conditions:
+        - Field: path-pattern
+          Values:
+            - !Sub "${SearchApiContextPath}/*"
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref SearchApiTargetGroup
+
+  # ======================
+  # Search API Log Groups
+  # ======================
+
+  SearchApiLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/ecs/${ProjectName}/search-api"
+      RetentionInDays: 7
+
+  # ======================
+  # Search API Task Definition
+  # ======================
+
+  SearchApiTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub "${ProjectName}-search-api"
+      Cpu: 512
+      Memory: 1024
+      NetworkMode: awsvpc
+      RequiresCompatibilities: [FARGATE]
+      ExecutionRoleArn: !GetAtt ECSTaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt ECSAppRole.Arn
+      ContainerDefinitions:
+        - Name: search-api
+          Image: !Ref SearchApiContainerImage
+          Essential: true
+          PortMappings:
+            - ContainerPort: !Ref SearchApiServicePort
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref SearchApiLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ecs
+              #awslogs-create-group: "false"  # Since we're creating it explicitly
+          Environment:
+            - Name: AWS_REGION
+              Value: !Ref AWS::Region
+            - Name: SERVER_SERVLET_CONTEXT_PATH
+              Value: !Ref SearchApiContextPath
+            - Name: SERVER_PORT
+              Value: !Sub "${SearchApiServicePort}"
+          Secrets:
+            - Name: DB_USER
+              ValueFrom: !Sub "${DBSecretArn}:username::"
+            - Name: DB_PASSWORD
+              ValueFrom: !Sub "${DBSecretArn}:password::"
+            - Name: DB_HOST
+              ValueFrom: !Sub "${DBSecretArn}:host::"
+            - Name: DB_PORT
+              ValueFrom: !Sub "${DBSecretArn}:port::"
+            - Name: DB_NAME
+              ValueFrom: !Sub "${DBSecretArn}:dbname::"
+            - Name: LLM_ENDPOINT
+              ValueFrom: !Sub "${LLMSecret}:url::"
+
+  # ======================
+  # Search API ECS Service
+  # ======================
+
+  SearchApiService:
+    Type: AWS::ECS::Service
+    #DependsOn: InternetGateway
+    Properties:
+      Cluster: !Ref ECSCluster
+      LaunchType: FARGATE
+      DesiredCount: 1
+      TaskDefinition: !Ref SearchApiTaskDefinition
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          SecurityGroups:
+            - !Ref ECSServiceSecurityGroup
+          Subnets: !Ref SubnetIds
+      LoadBalancers:
+        - TargetGroupArn: !Ref SearchApiTargetGroup
+          ContainerName: search-api
+          ContainerPort: !Ref SearchApiServicePort
+    DependsOn: 
+      - SearchApiListenerRule
+
+Outputs:
+  ECSClusterName:
+    Value: !Ref ECSCluster
+  SearchApiServiceName:
+    Value: !Ref SearchApiService
+  LLMServiceName:
+    Value: !Ref LLMService
+  LLMSecretArn:
+    Description: ARN of the LLM endpoint secret
+    Value: !Ref LLMSecret
+    Export:
+      Name: LLMSecretArn
+  ALBEndpoint:
+    Description: Public URL of the search service
+    Value: !Sub "http://${ALB.DNSName}"
+

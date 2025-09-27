@@ -1,0 +1,1 @@
+docker build -t search-api:latest -f Dockerfile ..

@@ -1,0 +1,10 @@
+[
+  {
+    "ParameterKey": "DBSecretArn",
+    "ParameterValue": "arn:aws:secretsmanager:us-east-1:776567512212:secret:semantic-search/db-creds-2-6Fd7a6"
+  },
+  {
+    "ParameterKey": "LLMSecretArn",
+    "ParameterValue": "arn:aws:secretsmanager:us-east-1:776567512212:secret:semantic-search/llm-endpoint-tZNipu"
+  }
+]

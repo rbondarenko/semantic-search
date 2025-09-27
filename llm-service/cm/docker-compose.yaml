@@ -1,0 +1,15 @@
+services:
+  llm-service:
+    image: llm-service:latest
+    container_name: llm-service
+    ports:
+      - "8081:8081"
+    environment:
+      ROOT_PATH: /llm
+      MODEL_NAME: sentence-transformers/all-MiniLM-L6-v2
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/llm/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s

@@ -1,0 +1,7 @@
+.venv
+.docs
+*.iml
+.idea/
+_trash/
+_data/
+search-api/target/

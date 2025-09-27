@@ -1,0 +1,232 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Semantic Search project - RDS Postgres + pgvector, DB Secrets, DB bootstrap lambda
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: semantic-search
+  DBName:
+    Type: String
+    Default: products
+  DBInstanceClass:
+    Type: String
+    Default: db.t3.micro
+  DBAllocatedStorage:
+    Type: Number
+    Default: 20
+  DBEngineVersion:
+    Type: String
+    Default: "15.4"
+#  LLMEndpoint:
+#    Type: String
+#    Description: URL of LLM service (ECS task)
+#    #Default: https://api-inference.huggingface.co/embeddings/sentence-transformers/all-MiniLM-L6-v2
+  VpcId:
+    Type: String
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+  DBUsername:
+    Type: String
+    Default: masteruser
+  DBPassword:
+    Type: String
+    NoEcho: true
+
+Resources:
+
+  # ======================
+  # RDS Parameter Group with pgvector
+  # ======================
+  #PostgresParameterGroup:
+  #  Type: AWS::RDS::DBParameterGroup
+  #  Properties:
+  #    Family: postgres15
+  #    Description: Enable pgvector extension
+  #    Parameters:
+  #      shared_preload_libraries: vector
+
+  # ======================
+  # DB Subnet Group (import VPC subnets from networking stack)
+  # ======================
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: "Subnet group for RDS"
+      #SubnetIds: !Split [ ",", !ImportValue PublicSubnets ]  # from networking stack or ECS stack
+      SubnetIds: !Ref SubnetIds
+
+
+  # ======================
+  # DB Security Group
+  # ======================
+  DBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref VpcId
+      GroupDescription: Enable Postgres access
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          CidrIp: 0.0.0.0/0
+
+  # ======================
+  # RDS PostgreSQL Instance (with pgvector)
+  # ======================
+  ProductsDB:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBName: !Ref DBName
+      Engine: postgres
+      EngineVersion: !Ref DBEngineVersion
+      DBInstanceClass: !Ref DBInstanceClass
+      DBInstanceIdentifier: !Ref DBName
+      #DBParameterGroupName: !Ref PostgresParameterGroup
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      AllocatedStorage: !Ref DBAllocatedStorage
+      PubliclyAccessible: true
+      BackupRetentionPeriod: 1
+      VPCSecurityGroups:
+        - !Ref DBSecurityGroup
+      DeletionProtection: false
+      #MasterUsername: !Join ["", ["{{resolve:secretsmanager:", !Ref AppDBSecret, ":SecretString:username}}"]]
+      MasterUsername: !Ref DBUsername
+      #MasterUserPassword: !Join ["", ["{{resolve:secretsmanager:", !Ref AppDBSecret, ":SecretString:password}}"]]
+      MasterUserPassword: !Ref DBPassword
+
+  # ======================
+  # Secrets Manager for DB creds
+  # ======================
+  AppDBSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub "${ProjectName}/db-creds-2"
+      Description: RDS Postgres credentials
+      SecretString: !Sub |
+        {
+          "username": "${DBUsername}",
+          "password": "${DBPassword}",
+          "host": "${ProductsDB.Endpoint.Address}",
+          "port": "${ProductsDB.Endpoint.Port}",
+          "dbname": "${ProductsDB.DBName}"
+        }
+      #GenerateSecretString:
+      #  SecretStringTemplate: '{"username":"dbuser"}'
+      #  GenerateStringKey: "password"
+      #  PasswordLength: 16
+      #  ExcludeCharacters: '"@/\'
+
+  # ======================
+  # IAM Role for DB Init Lambda
+  # ======================
+  DBInitLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-dbinit-lambda-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: SecretsAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Ref AppDBSecret
+
+  # ======================
+  # DB Init Lambda Function
+  # ======================
+  DBInitLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${ProjectName}-dbinit"
+      Runtime: python3.12
+      Role: !GetAtt DBInitLambdaRole.Arn
+      Handler: index.handler
+      Layers:
+        - arn:aws:lambda:us-east-1:770693421928:layer:Klayers-p312-psycopg2-binary:1
+      Timeout: 90
+      Code:
+        ZipFile: |
+            import json, boto3, psycopg2, os
+            try:
+                import cfnresponse
+            except ImportError:
+                print("[INFO] cfnresponse not available, using mock")
+                
+                class MockCfnResponse:
+                    SUCCESS = "SUCCESS"
+                    FAILED = "FAILED"
+                    
+                    @staticmethod
+                    def send(event, context, responseStatus, responseData, physicalResourceId=None, noEcho=False, reason=None):
+                        print(f"Mock cfnresponse.send called:")
+                        print(f"  Status: {responseStatus}")
+                        print(f"  Data: {responseData}")
+                        print(f"  Reason: {reason}")
+                        return True
+               
+                cfnresponse = MockCfnResponse()
+
+            def get_secret(secret_arn):
+                sm = boto3.client("secretsmanager")
+                sec = sm.get_secret_value(SecretId=secret_arn)
+                return json.loads(sec["SecretString"])
+            def handler(event, context):
+                if event["RequestType"] in ("Create","Update"):
+                    db_secret = get_secret(os.environ["DB_SECRET_ARN"])
+                    try:
+                        conn = psycopg2.connect(
+                          host=db_secret['host'],
+                          port=db_secret['port'],
+                          user=db_secret['username'],
+                          password=db_secret['password'],
+                          dbname=db_secret['dbname']
+                        )
+                        cur = conn.cursor()
+                        cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
+                        cur.execute("""
+                          CREATE TABLE IF NOT EXISTS products (
+                            asin  CHAR(10) PRIMARY KEY,
+                            title TEXT,
+                            department VARCHAR(255),
+                            description TEXT,
+                            embedding VECTOR(384)
+                          );
+                        """)
+                        # NOTE: embedding vector size depends on selected LLM model: check LLMModelName parameter in ecs.yaml
+                        conn.commit()
+                        cur.close()
+                        conn.close()
+                    except Exception as e:
+                        print("Error:", e)
+                        cfnresponse.send(event, context, cfnresponse.FAILED, {})
+                        return
+                cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+      Environment:
+        Variables:
+          DB_SECRET_ARN: !Ref AppDBSecret
+
+  #DBInitLambdaInvoke:
+  #  Type: Custom::DBInit
+  #  Properties:
+  #    ServiceToken: !GetAtt DBInitLambda.Arn
+  #    ServiceTimeout: 300 
+
+Outputs:
+  RDSInstanceEndpoint:
+    Description: RDS endpoint
+    Value: !GetAtt ProductsDB.Endpoint.Address
+  DBSecretArn:
+    Description: ARN of the RDS credentials secret
+    Value: !Ref AppDBSecret
+    Export:
+      Name: DBSecretArn

@@ -1,0 +1,1 @@
+docker build -t llm-service:latest -f Dockerfile ..

@@ -1,0 +1,42 @@
+services:
+  llm-service:
+    image: llm-service:latest
+    container_name: llm-service
+    #network_mode: host
+    ports:
+      - "8081:8081"
+    environment:
+      ROOT_PATH: /llm
+      MODEL_NAME: sentence-transformers/all-MiniLM-L6-v2
+#    healthcheck:
+#      test: ["CMD", "curl", "-f", "http://localhost:8081/llm/health"]
+#      interval: 30s
+#      timeout: 5s
+#      retries: 3
+#      start_period: 5s
+
+  search-api:
+    image: search-api:latest
+    container_name: search-api
+    #network_mode: host
+    ports:
+      - "8080:8080"
+    environment:
+      LLM_ENDPOINT: http://llm-service:8081
+      DB_HOST: products.c458qq6c009y.us-east-1.rds.amazonaws.com
+      DB_PORT: 5432
+      DB_NAME: products
+      DB_USER: masteruser
+      DB_PASSWORD: f9c6r7a4lIEXySwkMkxaBPeR
+      AWS_REGION: us-east-1
+      SERVER_SERVLET_CONTEXT_PATH: /search
+      SERVER_PORT: 8080
+#    depends_on:
+#      llm-service:
+#        condition: service_healthy
+#    healthcheck:
+#      test: ["CMD", "curl", "-f", "http://localhost:8080/search/actuator/health"]
+#      interval: 30s
+#      timeout: 5s
+#      retries: 3
+#      start_period: 5s

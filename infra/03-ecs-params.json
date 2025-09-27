@@ -1,0 +1,22 @@
+[
+  {
+    "ParameterKey": "VpcId",
+    "ParameterValue": "vpc-0a190a2700c2c26c8"
+  },
+  {
+    "ParameterKey": "SubnetIds",
+    "ParameterValue": "subnet-0efe7639b540f1fb7,subnet-083b5beebc8a809cb"
+  },
+  {
+    "ParameterKey": "SearchApiContainerImage",
+    "ParameterValue": "776567512212.dkr.ecr.us-east-1.amazonaws.com/search-api:latest"
+  },
+  {
+    "ParameterKey": "LLMServiceContainerImage",
+    "ParameterValue": "776567512212.dkr.ecr.us-east-1.amazonaws.com/llm-service:latest"
+  },
+  {
+    "ParameterKey": "DBSecretArn",
+    "ParameterValue": "arn:aws:secretsmanager:us-east-1:776567512212:secret:semantic-search/db-creds-2-6Fd7a6"
+  }
+]

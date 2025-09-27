@@ -1,0 +1,18 @@
+[
+  {
+    "ParameterKey": "VpcId",
+    "ParameterValue": "vpc-0a190a2700c2c26c8"
+  },
+  {
+    "ParameterKey": "SubnetIds",
+    "ParameterValue": "subnet-0efe7639b540f1fb7,subnet-083b5beebc8a809cb"
+  },
+  {
+    "ParameterKey": "DBEngineVersion",
+    "ParameterValue": "15.10"
+  },
+  {
+    "ParameterKey": "DBPassword",
+    "ParameterValue": "f9c6r7a4lIEXySwkMkxaBPeR"
+  }
+]

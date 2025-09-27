@@ -1,0 +1,24 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Semantic Search project - Users and Groups
+
+Resources:
+
+  # ======================
+  # Admins group + user
+  # ======================
+  AdminsGroup:
+    Type: AWS::IAM::Group
+    Properties:
+      GroupName: Admins
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+
+  DevAdminUser:
+    Type: AWS::IAM::User
+    Properties:
+      UserName: dev-admin
+      LoginProfile:
+        Password: ChangeMeNow!123   # <- replace, or remove for no console password
+        PasswordResetRequired: true
+      Groups:
+        - !Ref AdminsGroup
