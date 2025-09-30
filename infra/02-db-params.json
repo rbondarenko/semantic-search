@@ -13,6 +13,6 @@
   },
   {
     "ParameterKey": "DBPassword",
-    "ParameterValue": "f9c6r7a4lIEXySwkMkxaBPeR"
+    "ParameterValue": "${DB_PASSWORD}"
   }
 ]
