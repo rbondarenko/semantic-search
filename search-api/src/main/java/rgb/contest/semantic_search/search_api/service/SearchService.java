@@ -42,6 +42,6 @@ public class SearchService {
         log.warn("Embeddings string: {}", embeddingVector);
 
         List<Product> results = repository.searchByEmbedding(embeddingVector, request.getLimit());
-        return new SearchResponse(results);
+        return new SearchResponse(results, results.size());
     }
 }

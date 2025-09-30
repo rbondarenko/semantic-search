@@ -3,9 +3,6 @@ package rgb.contest.semantic_search.search_api.repository;
 import jakarta.persistence.AttributeConverter;
 import jakarta.persistence.Converter;
 
-import java.util.Arrays;
-import java.util.stream.Collectors;
-
 @Converter(autoApply = false) // use only where explicitly annotated
 public class PgVectorConverter implements AttributeConverter<float[], String> {
 
